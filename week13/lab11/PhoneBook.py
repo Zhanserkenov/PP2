@@ -1,87 +1,166 @@
-import psycopg2
-import csv
+import psycopg2, csv
+from config import host, password, user, database, port
 
-conn = psycopg2.connect(
-    host="localhost",
-    database="python",
-    user="postgres",
-    password="19660827"
-)
+def main():
 
-cur = conn.cursor()
+    try:
+        conn = psycopg2.connect(
+            host=host,
+            dbname=database,
+            user=user,
+            password=password,
+            port=port
+        )
 
-def upload_data_from_csv(filename):
-    with open(filename, 'r') as f:
-        reader = csv.reader(f)
-        for row in reader:
-            cur.execute(
-                "INSERT INTO PhoneBook (first_name, last_name, phone, email) VALUES (%s, %s, %s, %s)",
-                (row[0], row[1], row[2], row[3])
-            )
+        cur = conn.cursor()
+
+        command = '''
+        CREATE TABLE IF NOT EXISTS phonebook_table(
+                    id  SERIAL PRIMARY KEY,
+                    first_name VARCHAR(30) NOT NULL,
+                    last_name VARCHAR(30) NOT NULL,
+                    phone_num VARCHAR(30) NOT NULL
+        )'''
+
+        cur.execute(command)
         conn.commit()
-        print("Data uploaded successfully from", filename)
 
-def update_data(id, column, value):
-    cur.execute(
-        f"UPDATE PhoneBook SET {column} = %s WHERE id = %s",
-        (value, id)
-    )
-    conn.commit()
-    print("Data updated successfully")
+        print(
+        '''
+1 - Get records by pattern
+2 - Insert new user
+3 - Insert new users
+4 - Querying data from the tables with pagination (by limit and offset)
+5 - Deleting data from tables by username or phone
+        ''')
 
-def insert_data_from_console():
-    first_name = input("Enter first name: ")
-    last_name = input("Enter last name: ")
-    phone = input("Enter phone number: ")
-    email = input("Enter email address: ")
-    cur.execute(
-        "INSERT INTO PhoneBook (first_name, last_name, phone, email) VALUES (%s, %s, %s, %s)",
-        (first_name, last_name, phone, email)
-    )
-    conn.commit()
-    print("Data inserted successfully")
+        chosenone = int(input())
+        if chosenone == 1:
+            pattern = input()
 
-def query_data(column, value, limit, offset):
-    cur.execute(
-        f"SELECT * FROM PhoneBook WHERE {column} = %s LIMIT %s OFFSET %s",
-        (value, limit, offset)
-    )
-    rows = cur.fetchall()
-    if len(rows) == 0:
-        print("No records found")
-    else:
-        for row in rows:
-            print(row)
+            cur.execute('''
+            CREATE OR REPLACE FUNCTION getting_records(pattern VARCHAR)
+            RETURNS table(id INTEGER, first_name VARCHAR, last_name VARCHAR, phone_num VARCHAR)
+            AS $$
+            BEGIN 
+              RETURN QUERY
+              SELECT * FROM phonebook_table WHERE phonebook_table.first_name LIKE '%' || pattern || '%' OR phonebook_table.last_name LIKE '%' || pattern || '%' OR phonebook_table.phone_num LIKE '%' || pattern || '%';
+            END
+            $$ language plpgsql
+            ''')
+            conn.commit()
 
-def search_data(pattern):
-    cur.execute(
-        f"SELECT * FROM PhoneBook WHERE first_name LIKE '%{pattern}%' OR last_name LIKE '%{pattern}%' OR phone LIKE '%{pattern}%'"
-    )
-    rows = cur.fetchall()
-    if len(rows) == 0:
-        print("No records found")
-    else:
-        for row in rows:
-            print(row)
+            cur.execute(f'''SELECT * FROM getting_records('{pattern}')''')
+            res = cur.fetchall()
 
-def delete_data(column, value):
-    cur.execute(
-        f"DELETE FROM PhoneBook WHERE {column} = %s",
-        (value,)
-    )
-    conn.commit()
-    print("Data deleted successfully")
+            for row in res: print(row)
 
-upload_data_from_csv('PhoneBook_data.csv')
-insert_data_from_console()
-print("-----------------------------------------------------------------------------------")
-update_data(1, 'first_name', 'Jane')
-print("-----------------------------------------------------------------------------------")
-delete_data('last_name', 'Harris')
-print("-----------------------------------------------------------------------------------")
-search_data('7919')
-print("-----------------------------------------------------------------------------------")
-query_data('last_name', 'Jones', 10, 0) # Querying the first 10 records with last name = 'Jones'
+        if chosenone == 2:
+            cur.execute('''
+            CREATE OR REPLACE PROCEDURE insert_user(name VARCHAR, lastname VARCHAR, phone VARCHAR)
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+              IF EXISTS(SELECT 1 FROM phonebook_table WHERE first_name = name AND last_name = lastname) THEN
+                UPDATE phonebook_table SET phone_num = phone WHERE first_name = name AND last_name = lastname;
+              ELSE
+                INSERT INTO phonebook_table(first_name, last_name, phone_num) VALUES (name, lastname, phone);
+              END IF;
+            END;
+            $$;''')
+            conn.commit()
 
-cur.close()
-conn.close()
+            name = input('Enter name:')
+            lastname = input('Enter lastname:')
+            phone = input('Enter phone number:')
+            cur.execute(f'''CALL insert_user('{name}', '{lastname}','{phone}')''')
+            conn.commit()
+
+        if chosenone == 3:
+            cur.execute('''
+            CREATE OR REPLACE PROCEDURE insert_users(
+              IN names_list text[],
+              IN surnames_list text[],
+              IN phones_list text[]
+            )
+            LANGUAGE plpgsql
+            AS $$
+            DECLARE
+              i integer;
+              invalid_phones text[];
+            BEGIN
+              IF array_length(names_list, 1) != array_length(surnames_list, 1) OR array_length(names_list, 1) != array_length(phones_list, 1) 
+              THEN  RAISE EXCEPTION 'arrays must have the same length';
+              END IF;
+            
+              FOR i IN 1..array_length(names_list, 1) LOOP
+                IF phones_list[i] ~ '\D' THEN
+                  invalid_phones := array_append(invalid_phones, phones_list[i]);
+                ELSE
+                  INSERT INTO phonebook_table (first_name, last_name, phone_num)
+                  VALUES (names_list[i], surnames_list[i], phones_list[i]);
+                END IF;
+              END LOOP;
+            
+              IF array_length(invalid_phones, 1) > 0 THEN
+                RAISE EXCEPTION 'following phone numbers are invalid: %', invalid_phones;
+              END IF;
+            END;
+            $$;''')
+            conn.commit()
+
+
+            names = input().split()
+            surnames = input().split()
+            phones = input().split()
+
+            cur.execute("CALL insert_users(%s, %s, %s)", (names, surnames, phones))
+            conn.commit()
+
+        if chosenone == 4:
+            cur.execute('''
+            CREATE OR REPLACE FUNCTION paginating(a integer, b integer) 
+            RETURNS SETOF phonebook_table 
+            AS $$ 
+            SELECT * FROM phonebook_table 
+                LIMIT a OFFSET b; 
+            $$ 
+            language sql;''')
+            conn.commit()
+
+            Limit = input('Enter limit:')
+            Offset = input('Enter offset:')
+
+            cur.execute(f'''SELECT * FROM paginating({Limit}, {Offset});''')
+            res = cur.fetchall()
+
+            for row in res:
+                print(row)
+
+        if chosenone == 5:
+            cur.execute('''
+            CREATE OR REPLACE PROCEDURE delete_from_phonebook(IN search_text TEXT)
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+              DELETE FROM phonebook_table
+              WHERE first_name ILIKE '%' || search_text || '%' OR last_name ILIKE '%' || search_text || '%' OR phone_num ILIKE '%' || search_text || '%';
+            END;
+            $$;''')
+            conn.commit()
+
+            pattern = input()
+            cur.execute(f'''Call delete_from_phonebook('{pattern}')''')
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+    finally:
+        if cur is not None:
+            cur.close()
+        if conn is not None:
+            conn.close()
+
+if __name__ == '__main__':
+    main()
